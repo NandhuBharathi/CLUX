@@ -1,107 +1,44 @@
-//! Bare-Metal SIMD & Fused Kernels for SSM
+pub fn silu_f32(x: f32) -> f32 { x / (1.0 + (-x).exp()) }
+pub fn softplus_f32(x: f32) -> f32 { if x > 20.0 { x } else { (1.0 + x.exp()).ln() } }
+pub fn vector_dot_f32(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b.iter()).map(|(x, y)| x * y).sum() }
 
-/// Fused Discretization: A_bar = exp(delta * a_diag), B_bar = delta * b
-#[inline(always)]
-pub fn fused_discretize_f32(
-    delta: &[f32],
-    a_diag: &[f32],
-    b: &[f32],
-    a_bar: &mut [f32],
-    b_bar: &mut [f32],
-) {
-    let len = delta.len().min(a_diag.len()).min(b.len());
-    
-    // 4-way unrolled loop for SIMD auto-vectorization
-    let chunks = len / 4;
-    let remainder = len % 4;
-
-    for i in 0..chunks {
-        let idx = i * 4;
-        for k in 0..4 {
-            let j = idx + k;
-            a_bar[j] = (delta[j] * a_diag[j]).exp();
-            b_bar[j] = delta[j] * b[j];
-        }
-    }
-
-    let offset = chunks * 4;
-    for j in 0..remainder {
-        let idx = offset + j;
-        a_bar[idx] = (delta[idx] * a_diag[idx]).exp();
-        b_bar[idx] = delta[idx] * b[idx];
-    }
-}
-
-/// Diagonal SSM Scan Step:
-/// h_next = a_bar * h_prev + b_bar * x
-/// y = sum(c * h_next)
-#[inline(always)]
-pub fn ssm_scan_step_f32(
-    a_bar: &[f32],
-    b_bar: &[f32],
-    x_val: f32,
-    h_prev: &[f32],
-    h_next: &mut [f32],
-    c: &[f32],
-) -> f32 {
-    let state_dim = a_bar.len();
-    let mut sum = 0.0f32;
-
-    for i in 0..state_dim {
-        // Elementwise state decay + input injection
-        let next_h = a_bar[i] * h_prev[i] + b_bar[i] * x_val;
-        h_next[i] = next_h;
-        // Output projection dot product accumulation
-        sum += c[i] * next_h;
-    }
-
-    sum
-}
-
-/// Vector Dot Product
-#[inline(always)]
-pub fn vector_dot_f32(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len().min(b.len());
-    let mut acc0 = 0.0f32;
-    let mut acc1 = 0.0f32;
-    let mut acc2 = 0.0f32;
-    let mut acc3 = 0.0f32;
-
-    let chunks = len / 4;
-    let remainder = len % 4;
-
-    for i in 0..chunks {
-        let idx = i * 4;
-        acc0 += a[idx] * b[idx];
-        acc1 += a[idx + 1] * b[idx + 1];
-        acc2 += a[idx + 2] * b[idx + 2];
-        acc3 += a[idx + 3] * b[idx + 3];
-    }
-
-    let mut total = (acc0 + acc1) + (acc2 + acc3);
-    let offset = chunks * 4;
-    for j in 0..remainder {
-        total += a[offset + j] * b[offset + j];
-    }
-
-    total
-}
-
-/// In-place RMS Normalization
-#[inline(always)]
 pub fn rms_norm_f32(x: &mut [f32], weight: &[f32], eps: f32) {
     let len = x.len();
     if len == 0 { return; }
+    let sum_sq: f32 = x.iter().map(|v| v * v).sum();
+    let inv = 1.0 / ((sum_sq / len as f32) + eps).sqrt();
+    for i in 0..len { x[i] = x[i] * inv * weight[i]; }
+}
 
-    let mut sum_sq = 0.0f32;
-    for &val in x.iter() {
-        sum_sq += val * val;
+pub fn causal_conv1d_f32(input: &[f32], w: &[f32], s: &mut [f32], out: &mut [f32], ch: usize) {
+    for c in 0..ch {
+        let cw = &w[c * 4..(c + 1) * 4];
+        let cs = &mut s[c * 3..(c + 1) * 3];
+        let v = input[c];
+        out[c] = cs[0] * cw[0] + cs[1] * cw[1] + cs[2] * cw[2] + v * cw[3];
+        cs[0] = cs[1]; cs[1] = cs[2]; cs[2] = v;
     }
+}
 
-    let mean_sq = sum_sq / len as f32;
-    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
-
-    for i in 0..len {
-        x[i] = x[i] * inv_rms * weight[i];
+pub fn selective_scan_f32(x: &[f32], dt: &[f32], a: &[f32], b: &[f32], c: &[f32], h: &mut [f32], out: &mut [f32], di: usize, ds: usize) {
+    for i in 0..di {
+        let delta = softplus_f32(dt[i]);
+        let mut y = 0.0f32;
+        let off = i * ds;
+        for j in 0..ds {
+            let a_bar = (delta * a[off + j]).exp();
+            let b_bar = delta * b[j];
+            let next_h = a_bar * h[off + j] + b_bar * x[i];
+            h[off + j] = next_h;
+            y += c[j] * next_h;
+        }
+        out[i] = y;
     }
+}
+
+pub fn adamw_step_f32(param: &mut f32, grad: f32, m: &mut f32, v: &mut f32, lr: f32, b1: f32, b2: f32, wd: f32, eps: f32) {
+    *param -= lr * wd * *param;
+    *m = b1 * *m + (1.0 - b1) * grad;
+    *v = b2 * *v + (1.0 - b2) * (grad * grad);
+    *param -= lr * (*m / (1.0 - b1)) / ((*v / (1.0 - b2)).sqrt() + eps);
 }
