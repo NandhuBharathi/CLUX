@@ -23,7 +23,7 @@ fn main() {
         return;
     }
 
-    // CLI Subcommand: prepare <input_text> [output_bin]
+    // CLI: prepare
     if args.len() > 2 && args[1] == "prepare" {
         let input_path = &args[2];
         let output_path = if args.len() > 3 { &args[3] } else { "corpus.bin" };
@@ -41,14 +41,15 @@ fn main() {
         return;
     }
 
-    // CLI Subcommand: train <corpus_bin>
+    // CLI: train
     if args.len() > 2 && args[1] == "train" {
         let corpus_path = &args[2];
+        let steps = args.get(3).and_then(|s| s.parse::<usize>().ok()).unwrap_or(800);
         let config = EngineConfig {
             d_model: 256,
             d_state: 32,
-            steps: 300,
-            lr: 0.001,
+            steps,
+            lr: 0.05,
         };
 
         let mut engine = SsmTrainingEngine::new(config);
@@ -58,39 +59,31 @@ fn main() {
         return;
     }
 
-    // CLI Subcommand: generate [model.bin] <prompt> [num_tokens]
+    // CLI: generate
     if args.len() > 2 && args[1] == "generate" {
-        let model_path = if args.len() > 3 && args[2].ends_with(".bin") {
-            &args[2]
+        let (model_path, prompt_idx) = if args[2].ends_with(".bin") {
+            (args[2].as_str(), 3)
+        } else if std::path::Path::new("final_model.bin").exists() {
+            ("final_model.bin", 2)
         } else {
-            "best_model.bin"
+            ("best_model.bin", 2)
         };
 
-        let prompt = if args[2].ends_with(".bin") {
-            args.get(3).map(|s| s.as_str()).unwrap_or("வணக்கம்")
-        } else {
-            &args[2]
-        };
+        let prompt = args.get(prompt_idx).map(|s| s.as_str()).unwrap_or("வணக்கம்");
+        let max_tokens = args.get(prompt_idx + 1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(40);
 
-        let max_tokens = args.last().and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
-
-        println!("[*] Loading model: {}", model_path);
+        println!("[*] Loading Model: {}", model_path);
         match SsmTrainingEngine::load_from_file(model_path, 32) {
             Ok(engine) => {
-                println!("[*] Generating text for prompt: \"{}\"", prompt);
+                println!("[*] Prompt: \"{}\"", prompt);
                 let result = engine.generate(prompt, max_tokens);
                 println!("--------------------------------------------------");
-                println!("Output: {}", result);
+                println!("Generated Output:
+{}", result);
                 println!("--------------------------------------------------");
             }
             Err(e) => eprintln!("[!] Load Error: {}", e),
         }
         return;
     }
-
-    println!("CLUX Engine CLI Usage:");
-    println!("  clux --info");
-    println!("  clux prepare <input_text.txt> [corpus.bin]");
-    println!("  clux train <corpus.bin>");
-    println!("  clux generate [model.bin] <prompt> [tokens_count]");
 }
