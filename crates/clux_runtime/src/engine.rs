@@ -1,17 +1,14 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::collections::VecDeque;
 use clux_jit::{adamw_step_f32, rms_norm_f32, vector_dot_f32};
 use clux_family::{UbcEngine, UbcToken};
 use crate::layer::SsmLayer;
 use crate::telemetry::TelemetryDashboard;
 
 pub struct EngineConfig {
-    pub d_model: usize,
-    pub d_inner: usize,
-    pub d_state: usize,
-    pub num_layers: usize,
-    pub steps: usize,
-    pub lr: f32,
+    pub d_model: usize, pub d_inner: usize, pub d_state: usize,
+    pub num_layers: usize, pub steps: usize, pub lr: f32,
 }
 
 pub struct SsmTrainingEngine {
@@ -27,27 +24,17 @@ pub struct SsmTrainingEngine {
 
 impl SsmTrainingEngine {
     pub fn new(config: EngineConfig) -> Self {
-        let vocab_size = UbcEngine::vocab_size();
-        let (dm, di, ds, nl) = (config.d_model, config.d_inner, config.d_state, config.num_layers);
-        
-        let scale = (2.0 / (dm as f32)).sqrt();
-        let emb: Vec<f32> = (0..vocab_size * dm).map(|i| (((i * 37 + 13) % 97) as f32 / 97.0 - 0.5) * scale).collect();
-        let head: Vec<f32> = (0..vocab_size * dm).map(|i| (((i * 19 + 7) % 97) as f32 / 97.0 - 0.5) * scale).collect();
-        let layers = (0..nl).map(|l| SsmLayer::new(dm, di, ds, l)).collect();
+        let vs = UbcEngine::vocab_size();
+        let dm = config.d_model;
+        let scale = 0.02;
+        let emb: Vec<f32> = (0..vs * dm).map(|i| (((i * 37 + 13) % 97) as f32 / 97.0 - 0.5) * scale).collect();
+        let head: Vec<f32> = (0..vs * dm).map(|i| (((i * 19 + 7) % 97) as f32 / 97.0 - 0.5) * scale).collect();
+        let layers = (0..config.num_layers).map(|l| SsmLayer::new(dm, config.d_inner, config.d_state, l)).collect();
 
-        Self {
-            vocab_size,
-            embeddings: emb,
-            layers,
-            final_norm: vec![1.0; dm],
-            vocab_head: head,
-            head_m: vec![0.0; vocab_size * dm],
-            head_v: vec![0.0; vocab_size * dm],
-            config,
-        }
+        Self { vocab_size: vs, embeddings: emb, layers, final_norm: vec![1.0; dm], vocab_head: head, head_m: vec![0.0; vs * dm], head_v: vec![0.0; vs * dm], config }
     }
 
-    pub fn forward_token(&mut self, tok: usize, logits: &mut [f32]) {
+    pub fn forward_token(&mut self, tok: usize, logits: &mut [f32]) -> Vec<f32> {
         let dm = self.config.d_model;
         let off = (tok % self.vocab_size) * dm;
         let mut x = self.embeddings[off..off + dm].to_vec();
@@ -55,13 +42,13 @@ impl SsmTrainingEngine {
 
         for l in &mut self.layers {
             l.forward(&x, &mut out);
-            for i in 0..dm { x[i] = (x[i] + out[i]) * 0.7071; }
+            for i in 0..dm { x[i] = (x[i] + out[i]) * 0.5; }
         }
 
         rms_norm_f32(&mut x, &self.final_norm, 1e-5);
-        for v in 0..self.vocab_size {
-            logits[v] = vector_dot_f32(&x, &self.vocab_head[v * dm..(v + 1) * dm]);
-        }
+        let scale_down = 1.0 / (dm as f32).sqrt();
+        for v in 0..self.vocab_size { logits[v] = vector_dot_f32(&x, &self.vocab_head[v * dm..(v + 1) * dm]) * scale_down; }
+        x
     }
 
     pub fn train_on_corpus(&mut self, path: &str) -> Result<(), String> {
@@ -81,36 +68,28 @@ impl SsmTrainingEngine {
             let tgt = tokens[idx + 1] as usize % vs;
 
             let mut logits = vec![0.0; vs];
-            self.forward_token(cur, &mut logits);
+            let hidden_x = self.forward_token(cur, &mut logits);
 
             let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum_e = 0.0f32;
             let mut probs = vec![0.0; vs];
-            for v in 0..vs {
-                probs[v] = (logits[v] - max_l).exp();
-                sum_e += probs[v];
-            }
+            for v in 0..vs { probs[v] = (logits[v] - max_l).exp(); sum_e += probs[v]; }
             for v in 0..vs { probs[v] /= sum_e; }
 
             let loss = -probs[tgt].max(1e-7).ln();
+            let mut grad_x = vec![0.0f32; dm];
 
             for v in 0..vs {
-                let g = (if v == tgt { probs[v] - 1.0 } else { probs[v] }).clamp(-0.5, 0.5);
+                let g = (if v == tgt { probs[v] - 1.0 } else { probs[v] }).clamp(-0.1, 0.1);
                 let roff = v * dm;
                 for m in 0..dm {
-                    adamw_step_f32(
-                        &mut self.vocab_head[roff + m],
-                        g * 0.05,
-                        &mut self.head_m[roff + m],
-                        &mut self.head_v[roff + m],
-                        self.config.lr,
-                        0.9,
-                        0.999,
-                        0.01,
-                        1e-8,
-                    );
+                    grad_x[m] += g * self.vocab_head[roff + m];
+                    adamw_step_f32(&mut self.vocab_head[roff + m], g * hidden_x[m], &mut self.head_m[roff + m], &mut self.head_v[roff + m], self.config.lr, 0.9, 0.999, 0.01, 1e-8);
                 }
             }
+
+            let cur_off = cur * dm;
+            for m in 0..dm { self.embeddings[cur_off + m] -= self.config.lr * grad_x[m].clamp(-0.1, 0.1); }
 
             if loss < best { best = loss; let _ = self.save_model("best_model.bin"); }
             dash.update(s, 1, loss, loss * 1.01);
@@ -127,11 +106,20 @@ impl SsmTrainingEngine {
         let mut logits = vec![0.0; vs];
 
         for &t in &in_toks { self.forward_token(t.0 as usize, &mut logits); }
-
+        
         let mut last = in_toks.last().map(|t| t.0 as usize % vs).unwrap_or(0);
+        
+        // Presence Penalty Window (Memory of last 6 tokens)
+        let mut history: VecDeque<usize> = VecDeque::new();
+        history.push_back(last);
+
         for s in 0..count {
             self.forward_token(last, &mut logits);
-            logits[last] -= 1.5;
+            
+            // Dynamic N-gram Presence Penalty to break loops
+            for &hist_tok in &history {
+                logits[hist_tok] -= 1.2; 
+            }
 
             let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
             indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -156,6 +144,10 @@ impl SsmTrainingEngine {
 
             gen.push(UbcToken(chosen as u16));
             last = chosen;
+            
+            // Update History Window
+            history.push_back(chosen);
+            if history.len() > 6 { history.pop_front(); }
         }
         UbcEngine::decode_tokens(&gen)
     }
