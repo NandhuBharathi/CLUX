@@ -1,8 +1,9 @@
-//! Real Autoregressive SSM Training Engine
+//! Real Autoregressive SSM Training & Text Generation Engine
 
 use std::fs::File;
 use std::io::{Read, Write};
 use clux_jit::{fused_discretize_f32, ssm_scan_step_f32};
+use clux_family::{UbcEngine, UbcToken};
 use crate::telemetry::TelemetryDashboard;
 
 pub struct EngineConfig {
@@ -18,24 +19,50 @@ pub struct SsmTrainingEngine {
     pub weights_b: Vec<f32>,
     pub weights_c: Vec<f32>,
     pub delta: Vec<f32>,
-    pub token_embeddings: Vec<f32>, // Vocab Projection
 }
 
 impl SsmTrainingEngine {
     pub fn new(config: EngineConfig) -> Self {
         let state_dim = config.d_state;
-        let vocab_size = 512;
         Self {
             weights_a_diag: vec![-0.1f32; state_dim],
             weights_b: vec![0.05f32; state_dim],
             weights_c: vec![0.05f32; state_dim],
             delta: vec![0.1f32; state_dim],
-            token_embeddings: vec![0.01f32; vocab_size * state_dim],
             config,
         }
     }
 
-    /// Loads binary tokens directly from corpus.bin
+    pub fn load_from_file(filename: &str, d_state: usize) -> Result<Self, String> {
+        let mut file = File::open(filename).map_err(|e| e.to_string())?;
+        let mut magic = [0u8; 8];
+        file.read_exact(&mut magic).map_err(|e| e.to_string())?;
+
+        if &magic != b"CLUX_BIN" {
+            return Err("Invalid CLUX Model Binary Header".to_string());
+        }
+
+        let mut weights_c = vec![0.0f32; d_state];
+        for i in 0..d_state {
+            let mut buf = [0u8; 4];
+            file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            weights_c[i] = f32::from_le_bytes(buf);
+        }
+
+        Ok(Self {
+            config: EngineConfig {
+                d_model: 256,
+                d_state,
+                steps: 0,
+                lr: 0.0,
+            },
+            weights_a_diag: vec![-0.1f32; d_state],
+            weights_b: vec![0.05f32; d_state],
+            weights_c,
+            delta: vec![0.1f32; d_state],
+        })
+    }
+
     pub fn load_tokens_from_corpus(corpus_path: &str) -> Result<Vec<u16>, String> {
         let mut file = File::open(corpus_path).map_err(|e| e.to_string())?;
         let mut header = [0u8; 24];
@@ -56,7 +83,6 @@ impl SsmTrainingEngine {
         Ok(tokens)
     }
 
-    /// Runs true autoregressive next-token prediction training
     pub fn train_on_corpus(&mut self, corpus_path: &str) -> Result<(), String> {
         let tokens = Self::load_tokens_from_corpus(corpus_path)?;
         let total_steps = self.config.steps;
@@ -74,21 +100,17 @@ impl SsmTrainingEngine {
             let target_token = tokens[(token_cursor + 1) % num_tokens] as usize % 512;
             token_cursor = (token_cursor + 1) % num_tokens;
 
-            // 1. Fused SSM Discretization
             fused_discretize_f32(&self.delta, &self.weights_a_diag, &self.weights_b, &mut a_bar, &mut b_bar);
 
-            // 2. Continuous State Forward Step
             let x_val = (curr_token as f32) / 512.0;
             let mut h_next = vec![0.0f32; self.config.d_state];
             let predicted_y = ssm_scan_step_f32(&a_bar, &b_bar, x_val, &h_state, &mut h_next, &self.weights_c);
             h_state = h_next;
 
-            // 3. Loss & Analytical Gradient Update
             let target_y = (target_token as f32) / 512.0;
             let error = predicted_y - target_y;
             let loss = 0.5 * error * error;
 
-            // Backprop & Gradient Step (AdamW/SGD Update)
             let grad_c = error;
             for i in 0..self.config.d_state {
                 self.weights_c[i] -= self.config.lr * grad_c * h_state[i];
@@ -111,6 +133,42 @@ impl SsmTrainingEngine {
         self.save_model("final_model.bin")?;
         println!("\n[✓] Training complete! 'best_model.bin' and 'final_model.bin' generated.");
         Ok(())
+    }
+
+    /// Autoregressively generates text from a given seed prompt
+    pub fn generate(&self, prompt: &str, max_tokens: usize) -> String {
+        let input_tokens = UbcEngine::encode_str(prompt);
+        let mut generated_tokens = input_tokens.clone();
+
+        let mut h_state = vec![0.0f32; self.config.d_state];
+        let mut a_bar = vec![0.0f32; self.config.d_state];
+        let mut b_bar = vec![0.0f32; self.config.d_state];
+
+        fused_discretize_f32(&self.delta, &self.weights_a_diag, &self.weights_b, &mut a_bar, &mut b_bar);
+
+        // Feed prompt tokens to build context state
+        for &tok in &input_tokens {
+            let x_val = (tok.0 as f32 % 512.0) / 512.0;
+            let mut h_next = vec![0.0f32; self.config.d_state];
+            let _ = ssm_scan_step_f32(&a_bar, &b_bar, x_val, &h_state, &mut h_next, &self.weights_c);
+            h_state = h_next;
+        }
+
+        // Generate next tokens
+        let mut last_tok = input_tokens.last().copied().unwrap_or(UbcToken(65));
+        for _ in 0..max_tokens {
+            let x_val = (last_tok.0 as f32 % 512.0) / 512.0;
+            let mut h_next = vec![0.0f32; self.config.d_state];
+            let y_pred = ssm_scan_step_f32(&a_bar, &b_bar, x_val, &h_state, &mut h_next, &self.weights_c);
+            h_state = h_next;
+
+            let next_tok_val = ((y_pred.abs() * 512.0) as u16).max(32).min(512);
+            let next_token = UbcToken(next_tok_val);
+            generated_tokens.push(next_token);
+            last_tok = next_token;
+        }
+
+        UbcEngine::decode_tokens(&generated_tokens)
     }
 
     pub fn save_model(&self, filename: &str) -> Result<(), String> {

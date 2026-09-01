@@ -1,7 +1,6 @@
 //! Universal AI Bytecode (UBC) Engine
-//! Encodes UTF-8 codepoints / atomic graphemes into compact 16-bit IDs.
+//! Encodes and Decodes UTF-8 / Graphemes into 16-bit IDs.
 
-/// Universal AI Bytecode (UBC) - 16-bit Atomic Grapheme
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UbcToken(pub u16);
@@ -9,8 +8,6 @@ pub struct UbcToken(pub u16);
 pub struct UbcEngine;
 
 impl UbcEngine {
-    /// ASCII (0..127) maps to 0x0000..0x007F
-    /// Tamil unicode block (0x0B80..0x0BFF) maps to 0x0100..0x017F
     #[inline(always)]
     pub fn encode_char(c: char) -> UbcToken {
         let val = c as u32;
@@ -24,7 +21,24 @@ impl UbcEngine {
         }
     }
 
+    #[inline(always)]
+    pub fn decode_token(tok: UbcToken) -> Option<char> {
+        let val = tok.0 as u32;
+        if val < 128 {
+            char::from_u32(val)
+        } else if (0x0100..=0x017F).contains(&val) {
+            char::from_u32(0x0B80 + (val - 0x0100))
+        } else {
+            // Default printable fallback
+            Some(' ')
+        }
+    }
+
     pub fn encode_str(text: &str) -> Vec<UbcToken> {
         text.chars().map(Self::encode_char).collect()
+    }
+
+    pub fn decode_tokens(tokens: &[UbcToken]) -> String {
+        tokens.iter().filter_map(|&t| Self::decode_token(t)).collect()
     }
 }
