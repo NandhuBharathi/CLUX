@@ -1,6 +1,10 @@
 [package]
 name = "clux_runtime"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+clux_family = { path = "../clux_family" }
+clux_parser = { path = "../clux_parser" }
+clux_ir = { path = "../clux_ir" }
+clux_jit = { path = "../clux_jit" }
