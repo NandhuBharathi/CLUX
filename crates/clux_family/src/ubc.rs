@@ -1,37 +1,32 @@
-//! Universal AI Bytecode (UBC) Engine
-//! Encodes and Decodes UTF-8 / Graphemes into 16-bit IDs.
-
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UbcToken(pub u16);
 
 pub struct UbcEngine;
 
+pub const TAMIL_ALPHABET: &str = concat!(
+    " \n.,!?:;'",
+    "abcdefghijklmnopqrstuvwxyz",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "அஆஇஈஉஊஎஏஐஒஓஔஃ",
+    "கஙசஞடணதநபமயரலவழளறனஜஷஸஹ",
+    "்ாிீுூெேைொோௌ",
+    "0123456789-"
+);
+
 impl UbcEngine {
     #[inline(always)]
     pub fn encode_char(c: char) -> UbcToken {
-        let val = c as u32;
-        if val < 128 {
-            UbcToken(val as u16)
-        } else if (0x0B80..=0x0BFF).contains(&val) {
-            UbcToken(0x0100 + (val - 0x0B80) as u16)
+        if let Some(pos) = TAMIL_ALPHABET.chars().position(|x| x == c) {
+            UbcToken(pos as u16)
         } else {
-            let folded = ((val >> 8) ^ (val & 0xFF)) as u16;
-            UbcToken(0x0200 | (folded & 0x01FF))
+            UbcToken(0)
         }
     }
 
     #[inline(always)]
     pub fn decode_token(tok: UbcToken) -> Option<char> {
-        let val = tok.0 as u32;
-        if val < 128 {
-            char::from_u32(val)
-        } else if (0x0100..=0x017F).contains(&val) {
-            char::from_u32(0x0B80 + (val - 0x0100))
-        } else {
-            // Default printable fallback
-            Some(' ')
-        }
+        TAMIL_ALPHABET.chars().nth(tok.0 as usize)
     }
 
     pub fn encode_str(text: &str) -> Vec<UbcToken> {
@@ -40,5 +35,9 @@ impl UbcEngine {
 
     pub fn decode_tokens(tokens: &[UbcToken]) -> String {
         tokens.iter().filter_map(|&t| Self::decode_token(t)).collect()
+    }
+
+    pub fn vocab_size() -> usize {
+        TAMIL_ALPHABET.chars().count()
     }
 }
