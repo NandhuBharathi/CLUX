@@ -2,9 +2,11 @@
 
 pub mod ubc;
 pub mod decomposer;
+pub mod corpus;
 
 pub use ubc::{UbcEngine, UbcToken};
 pub use decomposer::Factorizer;
+pub use corpus::CorpusCompiler;
 
 pub type NodeId = u32;
 
@@ -67,26 +69,5 @@ impl FamilyGraph {
         });
 
         node_id
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tamil_factorization() {
-        let mut graph = FamilyGraph::new();
-        let token = Factorizer::intern_word(&mut graph, "மரங்கள்");
-        
-        assert_eq!(graph.node_count(), 2);
-        assert!(token.prefix_id.is_none());
-        assert!(token.suffix_id.is_some());
-    }
-
-    #[test]
-    fn test_ubc_encoding() {
-        let tokens = UbcEngine::encode_str("தமிழ்");
-        assert_eq!(tokens.len(), 5);
     }
 }

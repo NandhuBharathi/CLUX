@@ -1,0 +1,4 @@
+வணக்கம் உலகம். இது CLUX இறையாண்மை கொண்ட AI என்ஜின்.
+This is a sovereign AI training engine written from scratch in pure Rust.
+தமிழ் மற்றும் பல மொழிகளை அதிவேகமாக பயிற்றுவிக்க முடியும்.
+Zero PyTorch, Zero CUDA, 100% Native Bare-Metal Compute.
