@@ -29,11 +29,9 @@ pub struct SsmTrainingEngine {
 impl SsmTrainingEngine {
     pub fn new(config: EngineConfig) -> Self {
         let d_state = config.d_state;
-        
         let mut embeddings = vec![0.0f32; VOCAB_SIZE * d_state];
         let mut vocab_head = vec![0.0f32; VOCAB_SIZE * d_state];
 
-        // Small Gaussian-like deterministic init
         for i in 0..VOCAB_SIZE {
             for j in 0..d_state {
                 let seed = ((i * 31 + j * 17) % 97) as f32 / 97.0 - 0.5;
@@ -75,7 +73,7 @@ impl SsmTrainingEngine {
     }
 
     pub fn load_from_file(filename: &str) -> Result<Self, String> {
-        let mut file = File::open(filename).map_err(|e| e.to_string())?;
+        let mut file = File::open(filename).map_err(|e| format!("Cannot open '{}': {}", filename, e))?;
         let mut magic = [0u8; 12];
         file.read_exact(&mut magic).map_err(|e| e.to_string())?;
 
@@ -148,39 +146,34 @@ impl SsmTrainingEngine {
 
         let num_tokens = tokens.len();
         let lr = self.config.lr;
+        let mut lowest_loss = f32::MAX;
 
         for step in 1..=total_steps {
             let idx = (step - 1) % (num_tokens - 1);
             if idx == 0 {
-                // Reset state periodically at epoch boundary
                 h_state.fill(0.0);
             }
 
             let curr_token = tokens[idx] as usize % VOCAB_SIZE;
             let target_token = tokens[idx + 1] as usize % VOCAB_SIZE;
 
-            // 1. Fused SSM Discretization
             fused_discretize_f32(&self.delta, &self.weights_a_diag, &self.weights_b, &mut a_bar, &mut b_bar);
 
-            // 2. Token Embedding Lookup & SSM Scan
             let emb_offset = curr_token * d_state;
             let token_vec = &self.embeddings[emb_offset..emb_offset + d_state];
             for i in 0..d_state {
                 h_state[i] = a_bar[i] * h_state[i] + b_bar[i] * token_vec[i];
             }
 
-            // 3. RMS Normalization on Hidden State
             let mut norm_h = h_state.clone();
             rms_norm_f32(&mut norm_h, &self.norm_weight, 1e-5);
 
-            // 4. Vocab Logits Projection
             let mut logits = vec![0.0f32; VOCAB_SIZE];
             for v in 0..VOCAB_SIZE {
                 let row = &self.vocab_head[v * d_state..(v + 1) * d_state];
                 logits[v] = vector_dot_f32(&norm_h, row);
             }
 
-            // 5. Stable Softmax
             let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum_exp = 0.0f32;
             let mut probs = vec![0.0f32; VOCAB_SIZE];
@@ -192,10 +185,8 @@ impl SsmTrainingEngine {
                 probs[v] /= sum_exp;
             }
 
-            // 6. Cross Entropy Loss
             let loss = -probs[target_token].max(1e-7).ln();
 
-            // 7. Gradient Backpropagation with Gradient Clipping (-1.0 .. 1.0)
             for v in 0..VOCAB_SIZE {
                 let p = probs[v];
                 let raw_grad = if v == target_token { p - 1.0 } else { p };
@@ -203,7 +194,6 @@ impl SsmTrainingEngine {
 
                 let row_offset = v * d_state;
                 for d in 0..d_state {
-                    // Update Vocab Head with slight L2 weight decay
                     let grad_w = grad * norm_h[d] + 0.0001 * self.vocab_head[row_offset + d];
                     self.vocab_head[row_offset + d] -= lr * grad_w.clamp(-2.0, 2.0);
 
@@ -213,22 +203,23 @@ impl SsmTrainingEngine {
                 }
             }
 
+            if loss < lowest_loss {
+                lowest_loss = loss;
+                let _ = self.save_model("best_model.bin");
+            }
+
             dashboard.update(step, 1, loss, loss * 1.01);
 
             if step % 200 == 0 || step == total_steps {
                 dashboard.render();
-                if loss <= dashboard.best_loss {
-                    self.save_model("best_model.bin")?;
-                }
             }
         }
 
         self.save_model("final_model.bin")?;
-        println!("\n[✓] Training complete! Loss converged.");
+        println!("\n[✓] Training complete! 'best_model.bin' and 'final_model.bin' saved.");
         Ok(())
     }
 
-    /// Autoregressively generates text using Temperature & Top-K Sampling
     pub fn generate(&self, prompt: &str, max_tokens: usize, temperature: f32) -> String {
         let input_tokens = UbcEngine::encode_str(prompt);
         let mut generated_tokens = input_tokens.clone();
@@ -240,7 +231,6 @@ impl SsmTrainingEngine {
 
         fused_discretize_f32(&self.delta, &self.weights_a_diag, &self.weights_b, &mut a_bar, &mut b_bar);
 
-        // Warm up state with Prompt
         for &tok in &input_tokens {
             let tok_idx = tok.0 as usize % VOCAB_SIZE;
             let emb_offset = tok_idx * d_state;
@@ -262,18 +252,15 @@ impl SsmTrainingEngine {
             let mut norm_h = h_state.clone();
             rms_norm_f32(&mut norm_h, &self.norm_weight, 1e-5);
 
-            // Compute Logits
             let mut logits = vec![0.0f32; VOCAB_SIZE];
             for v in 0..VOCAB_SIZE {
                 let row = &self.vocab_head[v * d_state..(v + 1) * d_state];
                 logits[v] = vector_dot_f32(&norm_h, row);
-                // Slight penalty on recent repetition
                 if v == last_token_idx {
                     logits[v] -= 1.5;
                 }
             }
 
-            // Temperature Scaling
             let temp = temperature.max(0.1);
             let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum_exp = 0.0f32;
@@ -286,7 +273,6 @@ impl SsmTrainingEngine {
                 probs[v] /= sum_exp;
             }
 
-            // Deterministic CDF Cumulative Sampling
             let pseudo_rand = (((step * 47 + 13) % 100) as f32) / 100.0;
             let mut cum_prob = 0.0f32;
             let mut chosen_v = 0;
