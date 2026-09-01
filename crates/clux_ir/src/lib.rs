@@ -1,58 +1,41 @@
-//! CLUX Intermediate Representation (IR) & Static Arena Planner
+//! CLUX Intermediate Representation & Zero-Allocation Memory Arena
 
-pub mod tensor;
-pub mod op;
-pub mod graph;
+use std::cell::UnsafeCell;
 
-pub use tensor::{DataType, TensorDesc, TensorId};
-pub use op::IrOp;
-pub use graph::IrGraph;
+/// Static Pre-Allocated Arena for Bare-Metal execution without OS malloc overhead
+pub struct StaticArena {
+    memory: UnsafeCell<Vec<u8>>,
+    offset: std::cell::Cell<usize>,
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl StaticArena {
+    pub fn new(capacity: usize) -> Self {
+        let mut mem = Vec::with_capacity(capacity);
+        unsafe { mem.set_len(capacity); }
+        Self {
+            memory: UnsafeCell::new(mem),
+            offset: std::cell::Cell::new(0),
+        }
+    }
 
-    #[test]
-    fn test_ssm_ir_graph_construction() {
-        let mut graph = IrGraph::new();
+    pub fn alloc_f32_slice(&self, len: usize) -> &mut [f32] {
+        let bytes_needed = len * std::mem::size_of::<f32>();
+        let current = self.offset.get();
+        
+        // Align to 32-byte boundary for AVX2 SIMD compatibility
+        let align_offset = (32 - (current % 32)) % 32;
+        let start = current + align_offset;
+        let end = start + bytes_needed;
+        
+        self.offset.set(end);
 
-        // 1. Allocate Tensors: d_model = 256, d_state = 32
-        let x = graph.allocate_tensor(vec![1, 256], DataType::FP16);
-        let delta = graph.allocate_tensor(vec![1, 256], DataType::FP16);
-        let a_diag = graph.allocate_tensor(vec![256, 32], DataType::FP16);
-        let b = graph.allocate_tensor(vec![1, 32], DataType::FP16);
-        let c = graph.allocate_tensor(vec![1, 32], DataType::FP16);
+        unsafe {
+            let ptr = (*self.memory.get()).as_mut_ptr().add(start) as *mut f32;
+            std::slice::from_raw_parts_mut(ptr, len)
+        }
+    }
 
-        let a_bar = graph.allocate_tensor(vec![256, 32], DataType::FP16);
-        let b_bar = graph.allocate_tensor(vec![256, 32], DataType::FP16);
-        let h_prev = graph.allocate_tensor(vec![256, 32], DataType::FP16);
-        let h_next = graph.allocate_tensor(vec![256, 32], DataType::FP16);
-        let out_y = graph.allocate_tensor(vec![1, 256], DataType::FP16);
-
-        // 2. Push SSM Discretization Op
-        graph.push_op(IrOp::SsmDiscretize {
-            delta,
-            a_diag,
-            b,
-            out_a_bar: a_bar,
-            out_b_bar: b_bar,
-        });
-
-        // 3. Push SSM Scan Step Op
-        graph.push_op(IrOp::SsmScanStep {
-            a_bar,
-            b_bar,
-            x,
-            h_prev,
-            h_next,
-            c,
-            out_y,
-        });
-
-        assert_eq!(graph.op_count(), 2);
-        assert_eq!(graph.tensors.len(), 10);
-        // Ensure total arena size is 64-byte aligned and non-zero
-        assert!(graph.total_arena_size > 0);
-        assert_eq!(graph.total_arena_size % 64, 0);
+    pub fn reset(&self) {
+        self.offset.set(0);
     }
 }

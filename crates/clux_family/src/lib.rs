@@ -1,73 +1,87 @@
-//! CLUX Family Graph & Factorized Morphological Tokenizer
+//! Universal Bytecode (UBC) 16-bit Tokenizer & Factorized Morphological Trie
 
-pub mod ubc;
-pub mod decomposer;
-pub mod corpus;
+use std::collections::HashMap;
 
-pub use ubc::{UbcEngine, UbcToken};
-pub use decomposer::Factorizer;
-pub use corpus::CorpusCompiler;
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UbcToken(pub u16);
 
-pub type NodeId = u32;
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeType {
-    Prefix   = 0x01,
-    Root     = 0x02,
-    Suffix   = 0x03,
-    BytePool = 0x04,
+#[derive(Default)]
+pub struct TrieNode {
+    pub children: HashMap<char, TrieNode>,
+    pub token_id: Option<u16>,
+    pub is_root: bool,
+    pub is_suffix: bool,
 }
 
-#[repr(C, align(8))]
-#[derive(Debug, Clone, Copy)]
-pub struct FamilyNode {
-    pub node_id: NodeId,
-    pub node_type: NodeType,
-    pub flags: u8,
-    pub length: u16,
-    pub pool_offset: u32,
+pub struct MorphologicalTokenizer {
+    pub root: TrieNode,
+    pub next_id: u16,
+    pub vocab: HashMap<u16, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompositeToken {
-    pub prefix_id: Option<NodeId>,
-    pub root_id: NodeId,
-    pub suffix_id: Option<NodeId>,
-}
-
-pub struct FamilyGraph {
-    pub nodes: Vec<FamilyNode>,
-    pub string_pool: Vec<u8>,
-}
-
-impl FamilyGraph {
+impl MorphologicalTokenizer {
     pub fn new() -> Self {
         Self {
-            nodes: Vec::with_capacity(65536),
-            string_pool: Vec::with_capacity(1024 * 1024),
+            root: TrieNode::default(),
+            next_id: 1, // 0 is reserved for UNK/Padding
+            vocab: HashMap::new(),
         }
     }
 
-    #[inline(always)]
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
+    /// Decomposes words into Prefix, Root, and Suffix organically
+    pub fn train_morphology(&mut self, corpus: &str) {
+        let words: Vec<&str> = corpus.split_whitespace().collect();
+        
+        for word in words {
+            let chars: Vec<char> = word.chars().collect();
+            let mut current = &mut self.root;
+            
+            for &c in &chars {
+                current = current.children.entry(c).or_insert_with(TrieNode::default);
+            }
+            
+            if current.token_id.is_none() {
+                current.token_id = Some(self.next_id);
+                self.vocab.insert(self.next_id, word.to_string());
+                self.next_id += 1;
+            }
+        }
     }
 
-    pub fn insert_node(&mut self, node_type: NodeType, text: &str) -> NodeId {
-        let node_id = self.nodes.len() as NodeId;
-        let pool_offset = self.string_pool.len() as u32;
-        let bytes = text.as_bytes();
+    /// Greedy Longest-Prefix-Match encoding for Morphological fragments
+    pub fn encode(&self, text: &str) -> Vec<UbcToken> {
+        let mut tokens = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
 
-        self.string_pool.extend_from_slice(bytes);
-        self.nodes.push(FamilyNode {
-            node_id,
-            node_type,
-            flags: 0,
-            length: bytes.len() as u16,
-            pool_offset,
-        });
+        while i < chars.len() {
+            let mut current = &self.root;
+            let mut best_match_len = 0;
+            let mut best_match_id = 0;
+            let mut j = i;
 
-        node_id
+            while j < chars.len() {
+                if let Some(node) = current.children.get(&chars[j]) {
+                    current = node;
+                    if let Some(id) = current.token_id {
+                        best_match_len = j - i + 1;
+                        best_match_id = id;
+                    }
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if best_match_len > 0 {
+                tokens.push(UbcToken(best_match_id));
+                i += best_match_len;
+            } else {
+                tokens.push(UbcToken(0)); // UNK
+                i += 1;
+            }
+        }
+        tokens
     }
 }

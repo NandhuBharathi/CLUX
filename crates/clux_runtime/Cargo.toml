@@ -3,15 +3,8 @@ name = "clux_runtime"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "clux"
-crate-type = ["cdylib", "rlib"]
-
-[[bin]]
-name = "clux_runtime"
-path = "src/main.rs"
-
 [dependencies]
+clux_ir = { path = "../clux_ir" }
 clux_family = { path = "../clux_family" }
+clux_parser = { path = "../clux_parser" }
 clux_jit = { path = "../clux_jit" }
-pyo3 = { version = "0.20.0", features = ["extension-module"] }
