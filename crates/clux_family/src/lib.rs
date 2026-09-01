@@ -77,9 +77,9 @@ mod tests {
     #[test]
     fn test_tamil_factorization() {
         let mut graph = FamilyGraph::new();
-        let token = Factorizer::intern_word(&mut graph, "மரங்கள்"); // மரம் + கள்
+        let token = Factorizer::intern_word(&mut graph, "மரங்கள்");
         
-        assert_eq!(graph.node_count(), 2); // Root(மரம்) + Suffix(கள்)
+        assert_eq!(graph.node_count(), 2);
         assert!(token.prefix_id.is_none());
         assert!(token.suffix_id.is_some());
     }
@@ -87,6 +87,6 @@ mod tests {
     #[test]
     fn test_ubc_encoding() {
         let tokens = UbcEngine::encode_str("தமிழ்");
-        assert_eq!(tokens.len(), 5); // 5 codepoints mapped to atomic 16-bit IDs
+        assert_eq!(tokens.len(), 5);
     }
 }

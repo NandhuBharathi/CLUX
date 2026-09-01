@@ -1,22 +1,19 @@
 //! Morphological Factorization & Radix Sub-string Extraction
 
-use crate::{FamilyGraph, FamilyNode, NodeType, CompositeToken, NodeId};
+use crate::{FamilyGraph, NodeType, CompositeToken};
 
 pub struct Factorizer;
 
 impl Factorizer {
-    /// Common Tamil / Multilingual Suffixes
     const SUFFIXES: &'static [&'static str] = &[
         "கள்", "gal", "இல்", "il", "ஆல்", "aal", "உக்கு", "ukku", 
         "இன்", "in", "உடைய", "udaiya", "ing", "ed", "tion", "ly"
     ];
 
-    /// Common Prefixes
     const PREFIXES: &'static [&'static str] = &[
         "அ", "இ", "எ", "un", "re", "in", "dis", "pre"
     ];
 
-    /// Decomposes a word into (Prefix, Root, Suffix)
     pub fn decompose<'a>(word: &'a str) -> (&'a str, &'a str, &'a str) {
         if word.chars().count() <= 3 {
             return ("", word, "");
@@ -26,7 +23,6 @@ impl Factorizer {
         let mut remainder = word;
         let mut suffix = "";
 
-        // Check Prefix
         for p in Self::PREFIXES {
             if remainder.starts_with(p) && remainder.len() > p.len() + 2 {
                 prefix = p;
@@ -35,7 +31,6 @@ impl Factorizer {
             }
         }
 
-        // Check Suffix
         for s in Self::SUFFIXES {
             if remainder.ends_with(s) && remainder.len() > s.len() + 2 {
                 suffix = s;
@@ -47,7 +42,6 @@ impl Factorizer {
         (prefix, remainder, suffix)
     }
 
-    /// Interns a factorized token into the FamilyGraph
     pub fn intern_word(graph: &mut FamilyGraph, word: &str) -> CompositeToken {
         let (prefix, root, suffix) = Self::decompose(word);
 
