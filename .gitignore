@@ -1,0 +1,16 @@
+# Rust build outputs
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Compiled CLUX Binary & Model Artifacts
+*.bin
+*.engine
+*.checkpoint
+core_dump.*
+
+# IDE / OS cache
+.DS_Store
+.idea/
+.vscode/
+*.swp

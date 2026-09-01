@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/clux_family",
+    "crates/clux_parser",
+    "crates/clux_ir",
+    "crates/clux_jit",
+    "crates/clux_runtime",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
