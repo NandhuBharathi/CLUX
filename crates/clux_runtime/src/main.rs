@@ -23,54 +23,43 @@ fn main() {
         return;
     }
 
-    // CLI Subcommand: prepare <input_path_or_url> [output_path]
+    // CLI Subcommand: prepare <input_text> [output_bin]
     if args.len() > 2 && args[1] == "prepare" {
         let input_path = &args[2];
         let output_path = if args.len() > 3 { &args[3] } else { "corpus.bin" };
 
         println!("[*] Ingesting dataset from: {}", input_path);
-        
-        let input_file = match File::open(input_path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[!] Failed to open input file: {}", e);
-                return;
-            }
+        let input_file = File::open(input_path).expect("Failed to open input file");
+        let mut out_file = File::create(output_path).expect("Failed to create output binary");
+
+        let total_tokens = CorpusCompiler::compile_from_reader(input_file, &mut out_file).expect("Compilation error");
+        let mut update_file = File::options().write(true).open(output_path).unwrap();
+        update_file.seek(std::io::SeekFrom::Start(16)).unwrap();
+        std::io::Write::write_all(&mut update_file, &total_tokens.to_le_bytes()).unwrap();
+
+        println!("[✓] Dataset compiled to '{}' ({} tokens)", output_path, total_tokens);
+        return;
+    }
+
+    // CLI Subcommand: train <corpus_bin>
+    if args.len() > 2 && args[1] == "train" {
+        let corpus_path = &args[2];
+        let config = EngineConfig {
+            d_model: 256,
+            d_state: 32,
+            steps: 300,
+            lr: 0.001,
         };
 
-        let mut out_file = match File::create(output_path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[!] Failed to create output binary: {}", e);
-                return;
-            }
-        };
-
-        match CorpusCompiler::compile_from_reader(input_file, &mut out_file) {
-            Ok(total_tokens) => {
-                // Update total token count in the header
-                let mut out_file = File::options().write(true).open(output_path).unwrap();
-                out_file.seek(std::io::SeekFrom::Start(16)).unwrap();
-                std::io::Write::write_all(&mut out_file, &total_tokens.to_le_bytes()).unwrap();
-
-                println!("[✓] Dataset successfully compiled to '{}'", output_path);
-                println!("    Total UBC Tokens Processed: {}", total_tokens);
-            }
-            Err(e) => eprintln!("[!] Compilation error: {}", e),
+        let mut engine = SsmTrainingEngine::new(config);
+        if let Err(e) = engine.train_on_corpus(corpus_path) {
+            eprintln!("[!] Training Error: {}", e);
         }
         return;
     }
 
-    println!("[*] Initializing CLUX SSM Training Simulation...");
-    let config = EngineConfig {
-        d_model: 256,
-        d_state: 32,
-        steps: 100,
-        lr: 0.0003,
-    };
-
-    let mut engine = SsmTrainingEngine::new(config);
-    if let Err(e) = engine.run_training() {
-        eprintln!("[!] Engine Error: {}", e);
-    }
+    println!("CLUX Engine CLI Usage:");
+    println!("  clux --info");
+    println!("  clux prepare <input_text.txt> [corpus.bin]");
+    println!("  clux train <corpus.bin>");
 }

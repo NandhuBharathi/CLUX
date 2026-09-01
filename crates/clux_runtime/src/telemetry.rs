@@ -4,7 +4,6 @@ use std::time::Instant;
 
 pub struct TelemetryDashboard {
     start_time: Instant,
-    last_tick: Instant,
     pub total_tokens: usize,
     pub current_step: usize,
     pub total_steps: usize,
@@ -18,7 +17,6 @@ impl TelemetryDashboard {
         let now = Instant::now();
         Self {
             start_time: now,
-            last_tick: now,
             total_tokens: 0,
             current_step: 0,
             total_steps,
@@ -50,12 +48,12 @@ impl TelemetryDashboard {
             0.0
         };
 
-        let perplexity = self.train_loss.exp();
+        let perplexity = (self.train_loss.min(10.0)).exp();
 
         // ANSI Terminal Refresh
         print!("\x1B[2J\x1B[1;1H");
         println!("================================================================================");
-        println!("  CLUX ENGINE :: SOVEREIGN TRAINING RUNNER [Bare-Metal JIT]");
+        println!("  CLUX ENGINE :: SOVEREIGN SSM TRAINING RUNNER [Native Bare-Metal]");
         println!("================================================================================");
         println!("  Progress    : [{:>5.1}%] Step {} / {}", progress_pct, self.current_step, self.total_steps);
         println!("  Elapsed     : {:02}m {:02}s  |  Dynamic ETA : {:02}m {:02}s", 
@@ -63,9 +61,9 @@ impl TelemetryDashboard {
             (eta_secs as u32) / 60, (eta_secs as u32) % 60
         );
         println!("--------------------------------------------------------------------------------");
-        println!("  Train Loss  : {:.4}        |  Val Loss    : {:.4}", self.train_loss, self.val_loss);
+        println!("  Train Loss  : {:.4}        |  Val Loss     : {:.4}", self.train_loss, self.val_loss);
         println!("  Perplexity  : {:.3}         |  Best Val Loss: {:.4}", perplexity, self.best_loss);
-        println!("  Throughput  : {:>10.1} tok/s |  Total Tokens : {}", tok_per_sec, self.total_tokens);
+        println!("  Throughput  : {:>10.1} tok/s |  Total Tokens  : {}", tok_per_sec, self.total_tokens);
         println!("================================================================================");
     }
 }
